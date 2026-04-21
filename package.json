@@ -1,0 +1,25 @@
+{
+  "name": "kujou-game",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build --webpack",
+    "start": "next start",
+    "export": "GITHUB_PAGES=true next build --webpack"
+  },
+  "dependencies": {
+    "next": "16.2.4",
+    "phaser": "^3.90.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@babel/preset-env": "^7.29.2",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "babel-loader": "^10.1.1",
+    "typescript": "^5"
+  }
+}
