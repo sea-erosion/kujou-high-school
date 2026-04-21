@@ -113,6 +113,41 @@ export class TitleScene extends Phaser.Scene {
       strokeThickness: 3,
     }).setOrigin(0.5).setDepth(10);
 
+    // EDIT ボタン
+    const editBtn = this.add.text(W / 2, H * 0.59, '[ COURSE EDITOR ]', {
+      fontSize: '15px',
+      fontFamily: '"Courier New", monospace',
+      color: '#44ddaa',
+      stroke: '#000000',
+      strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(10).setInteractive({ cursor: 'pointer' });
+    editBtn.on('pointerover', () => editBtn.setStyle({ color: '#88ffcc' }));
+    editBtn.on('pointerout',  () => editBtn.setStyle({ color: '#44ddaa' }));
+    editBtn.on('pointerdown', () => this.startEditor());
+    this.tweens.add({
+      targets: editBtn, alpha: 0.6, duration: 900, yoyo: true, repeat: -1,
+    });
+
+    // セーブデータから遊ぶ
+    const savedLevels = (() => {
+      try {
+        const raw = localStorage.getItem('kujou_custom_levels');
+        return raw ? (JSON.parse(raw) as any[]) : [];
+      } catch { return []; }
+    })();
+    if (savedLevels.length > 0) {
+      const playCustomBtn = this.add.text(W / 2, H * 0.645, `[ マイコースで遊ぶ (${savedLevels.length}コース) ]`, {
+        fontSize: '12px',
+        fontFamily: '"Courier New", monospace',
+        color: '#aaddff',
+        stroke: '#000000',
+        strokeThickness: 2,
+      }).setOrigin(0.5).setDepth(10).setInteractive({ cursor: 'pointer' });
+      playCustomBtn.on('pointerover', () => playCustomBtn.setStyle({ color: '#ddeeff' }));
+      playCustomBtn.on('pointerout',  () => playCustomBtn.setStyle({ color: '#aaddff' }));
+      playCustomBtn.on('pointerdown', () => this.showCustomLevelMenu(savedLevels));
+    }
+
     // Controls hint
     const controls = [
       '←→/WASD : 移動    SPACE : ジャンプ    SHIFT : ダッシュ',
@@ -229,6 +264,48 @@ export class TitleScene extends Phaser.Scene {
     this.cameras.main.fadeOut(400, 0, 0, 0);
     this.time.delayedCall(400, () => {
       this.scene.start('GameScene');
+    });
+  }
+
+  private startEditor() {
+    this.cameras.main.fadeOut(400, 0, 0, 0);
+    this.time.delayedCall(400, () => {
+      this.scene.start('EditorScene');
+    });
+  }
+
+  private showCustomLevelMenu(levels: any[]) {
+    const { width: W, height: H } = this.scale;
+    // 既存メニューを削除
+    const existing = this.children.getByName('customMenu');
+    if (existing) { existing.destroy(); return; }
+
+    const container = this.add.container(W/2 - 150, H * 0.55).setDepth(50).setName('customMenu');
+    const bg = this.add.graphics();
+    bg.fillStyle(0x0e0c20, 0.95);
+    bg.fillRoundedRect(0, 0, 300, Math.min(levels.length * 36 + 20, 200), 6);
+    bg.lineStyle(1, 0x4433aa, 1);
+    bg.strokeRoundedRect(0, 0, 300, Math.min(levels.length * 36 + 20, 200), 6);
+    container.add(bg);
+
+    levels.slice(0, 5).forEach((lvl: any, i: number) => {
+      const btn = this.add.text(10, 10 + i * 36, `▶ ${lvl.name}`, {
+        fontSize: '13px', fontFamily: 'monospace', color: '#ccaaff',
+        backgroundColor: '#1a1540', padding: { x: 8, y: 4 },
+      }).setInteractive({ cursor: 'pointer' });
+      btn.on('pointerdown', () => {
+        this.cameras.main.fadeOut(400, 0, 0, 0);
+        this.time.delayedCall(400, () => {
+          // カスタムレベルをパース → GameSceneへ
+          const { LevelEditorState } = require('../systems/LevelEditorState');
+          const state = new LevelEditorState();
+          state.loadFromStorage(lvl.id);
+          this.scene.start('GameScene', { customLevel: state.toLevelDef() });
+        });
+      });
+      btn.on('pointerover', () => btn.setStyle({ color: '#ffffff' }));
+      btn.on('pointerout',  () => btn.setStyle({ color: '#ccaaff' }));
+      container.add(btn);
     });
   }
 
