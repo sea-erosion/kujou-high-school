@@ -101,10 +101,20 @@ export class Player {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
 
+  // Tile system integration
+  public nearLadder: boolean = false;
+  public climbing: boolean = false;
+  public movingPlatformVel: { x: number; y: number } = { x: 0, y: 0 };
+  public onSpring: boolean = false;
+  private springTimer: number = 0;
+  private climbSpeed: number = 120;
+  private ladderGfx!: Phaser.GameObjects.Graphics;
+
   // UI callback
   public onHpChanged?: (hp: number, maxHp: number) => void;
   public onComboChanged?: (count: number) => void;
   public onStatusChanged?: (statuses: StatusType[]) => void;
+  public onWarp?: (wx: number, wy: number) => void;
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
     this.scene = scene;
@@ -123,6 +133,8 @@ export class Player {
     // Umbrella overlay graphic
     this.umbrellaSprite = scene.add.graphics();
     this.umbrellaSprite.setDepth(11);
+    this.ladderGfx = scene.add.graphics();
+    this.ladderGfx.setDepth(12);
 
     // Status effects
     this.statusEffects = new StatusEffectManager(
@@ -230,12 +242,24 @@ export class Player {
         this.onComboChanged?.(0);
       }
     }
+    if (this.springTimer > 0) this.springTimer -= delta;
+
+    // Activate spring jump
+    if (this.onSpring && this.springTimer <= 0 && this.onGround) {
+      this.body.setVelocityY(-820);
+      this.jumpCount = 0;
+      this.springTimer = 400;
+      this.onSpring = false;
+      try { this.scene.sound.play('sfx_jump', { volume: 0.6 }); } catch(_){}
+    }
 
     // Active state processing
     if (this.dashing) {
       this.processDash(delta);
     } else if (this.rolling) {
       this.processRoll(delta);
+    } else if (this.climbing) {
+      this.processClimb(dt);
     } else if (this.attacking) {
       this.processAttack(delta);
     } else if (this.hurtTimer > 0) {
@@ -265,6 +289,12 @@ export class Player {
   // ─── MOVEMENT ───────────────────────────────
 
   private processMovement(dt: number) {
+    // 梯子乗り込み判定（上下キーで梯子エリア内にいるとき）
+    if (this.nearLadder && (this.isUp() || this.isDown()) && !this.dashing && !this.rolling) {
+      this.startClimbing();
+      return;
+    }
+
     if (!this.statusEffects.canMove()) {
       this.applyFriction(dt, 0.8);
       this.setAnim('player_idle');
@@ -307,6 +337,73 @@ export class Player {
   private applyFriction(dt: number, factor: number) {
     const vx = this.body.velocity.x;
     this.body.setVelocityX(vx * Math.pow(factor, dt * 60));
+  }
+
+  // ─── 梯子登り ──────────────────────────────────
+
+  private startClimbing() {
+    this.climbing = true;
+    this.body.setAllowGravity(false);
+    this.body.setVelocity(0, 0);
+    this.setAnim('player_idle');
+    this.jumpCount = 0;
+    this.ladderGfx.clear();
+    // 梯子掴みエフェクト（グリップライン）
+    const x = this.sprite.x, y = this.sprite.y;
+    this.ladderGfx.lineStyle(2, 0xaa8855, 0.8);
+    this.ladderGfx.lineBetween(x - 4, y - 8, x - 4, y + 8);
+    this.ladderGfx.lineBetween(x + 4, y - 8, x + 4, y + 8);
+  }
+
+  private processClimb(dt: number) {
+    // 梯子から出る条件
+    if (!this.nearLadder) {
+      this.stopClimbing();
+      return;
+    }
+
+    // ジャンプで梯子を離れる
+    if (this.isJumpPressed()) {
+      this.stopClimbing();
+      this.body.setVelocityY(JUMP_VEL);
+      this.jumpCount = 1;
+      try { this.scene.sound.play('sfx_jump', { volume: 0.5 }); } catch(_){}
+      return;
+    }
+
+    const spd = this.climbSpeed * this.statusEffects.getSpeedMultiplier();
+    let vy = 0;
+    let vx = 0;
+
+    if (this.isUp())   vy = -spd;
+    if (this.isDown()) vy =  spd;
+    if (this.isLeft()) { vx = -spd * 0.5; }
+    if (this.isRight()){ vx =  spd * 0.5; }
+
+    this.body.setVelocity(vx, vy);
+    this.setAnim(vy !== 0 ? 'player_run' : 'player_idle');
+
+    // 梯子掴みエフェクト更新
+    this.ladderGfx.clear();
+    if (vy !== 0) {
+      const t = this.scene.time.now * 0.01;
+      const x = this.sprite.x;
+      const y = this.sprite.y;
+      this.ladderGfx.lineStyle(2, 0xaa8855, 0.7);
+      this.ladderGfx.lineBetween(x - 5 + Math.sin(t) * 1, y - 10, x - 5, y + 10);
+      this.ladderGfx.lineBetween(x + 5 + Math.sin(t + Math.PI) * 1, y - 10, x + 5, y + 10);
+    }
+
+    // 梯子の上端・下端でアクションキー押下 → 降りる
+    if (this.isDown() && this.onGround) {
+      this.stopClimbing();
+    }
+  }
+
+  private stopClimbing() {
+    this.climbing = false;
+    this.body.setAllowGravity(true);
+    this.ladderGfx.clear();
   }
 
   // ─── ACTIONS ────────────────────────────────
