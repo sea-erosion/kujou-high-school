@@ -1,12 +1,11 @@
 /**
- * game.ts
- * Phaser game configuration and initialization
+ * game.ts - Phaser game configuration
  */
-
 import Phaser from 'phaser';
-import { TitleScene } from './scenes/TitleScene';
-import { GameScene } from './scenes/GameScene';
-import { UIScene } from './scenes/UIScene';
+import { TitleScene }  from './scenes/TitleScene';
+import { GameScene }   from './scenes/GameScene';
+import { UIScene }     from './scenes/UIScene';
+import { EditorScene } from './scenes/EditorScene';
 
 export function createGame(parent: HTMLElement): Phaser.Game {
   const config: Phaser.Types.Core.GameConfig = {
@@ -19,12 +18,9 @@ export function createGame(parent: HTMLElement): Phaser.Game {
     antialias: false,
     physics: {
       default: 'arcade',
-      arcade: {
-        gravity: { x: 0, y: 900 },
-        debug: false,
-      },
+      arcade: { gravity: { x: 0, y: 900 }, debug: false },
     },
-    scene: [TitleScene, GameScene, UIScene],
+    scene: [TitleScene, GameScene, UIScene, EditorScene],
     scale: {
       mode: Phaser.Scale.FIT,
       autoCenter: Phaser.Scale.CENTER_BOTH,
@@ -34,10 +30,6 @@ export function createGame(parent: HTMLElement): Phaser.Game {
       antialias: false,
       antialiasGL: false,
     },
-    audio: {
-      disableWebAudio: false,
-    },
   };
-
   return new Phaser.Game(config);
 }
