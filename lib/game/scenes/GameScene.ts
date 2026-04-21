@@ -1,100 +1,46 @@
 /**
  * GameScene.ts
- * Main gameplay scene: level layout, enemy spawning, collision, camera, audio
+ * ─────────────────────────────────────────────────────────────────────────────
+ * タイルマップシステム対応メインゲームシーン
+ * 水平・垂直両方向スクロール、梯子、移動床、バネ、ピット、ワープ対応
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 import Phaser from 'phaser';
 import { Player } from '../entities/Player';
 import { Enemy, Thug, GangBoss } from '../entities/Enemy';
 import { StatusType } from '../systems/StatusEffects';
-
-// ─── LEVEL DEFINITION ────────────────────────
-
-interface PlatformDef {
-  x: number; y: number; w: number; h: number;
-  type: 'floor' | 'platform' | 'wall';
-}
-
-interface EnemySpawn {
-  x: number; y: number;
-  type: 'thug' | 'thug_red' | 'boss';
-  trigger?: number; // x position that triggers this wave
-}
-
-const LEVEL_1: { platforms: PlatformDef[]; enemies: EnemySpawn[]; width: number; height: number } = {
-  width: 3200,
-  height: 600,
-  platforms: [
-    // Ground
-    { x: 0,    y: 480, w: 3200, h: 20,  type: 'floor' },
-    // Walls
-    { x: 0,    y: 0,   w: 16,   h: 480, type: 'wall' },
-    { x: 3184, y: 0,   w: 16,   h: 480, type: 'wall' },
-    // Platforms (school corridor)
-    { x: 200,  y: 380, w: 160,  h: 12,  type: 'platform' },
-    { x: 450,  y: 320, w: 120,  h: 12,  type: 'platform' },
-    { x: 650,  y: 260, w: 140,  h: 12,  type: 'platform' },
-    { x: 880,  y: 340, w: 120,  h: 12,  type: 'platform' },
-    { x: 1100, y: 280, w: 160,  h: 12,  type: 'platform' },
-    // Staircase area
-    { x: 1300, y: 420, w: 100,  h: 12,  type: 'platform' },
-    { x: 1400, y: 360, w: 100,  h: 12,  type: 'platform' },
-    { x: 1500, y: 300, w: 100,  h: 12,  type: 'platform' },
-    // Mid section
-    { x: 1700, y: 380, w: 200,  h: 12,  type: 'platform' },
-    { x: 2000, y: 300, w: 180,  h: 12,  type: 'platform' },
-    // Boss arena approach
-    { x: 2300, y: 380, w: 120,  h: 12,  type: 'platform' },
-    { x: 2500, y: 310, w: 100,  h: 12,  type: 'platform' },
-    // Boss arena platforms
-    { x: 2700, y: 400, w: 500,  h: 12,  type: 'platform' },
-    { x: 2780, y: 300, w: 180,  h: 12,  type: 'platform' },
-  ],
-  enemies: [
-    // Wave 1: intro thugs
-    { x: 400,  y: 440, type: 'thug' },
-    { x: 550,  y: 440, type: 'thug' },
-    // Wave 2: platform ambush
-    { x: 800,  y: 440, type: 'thug_red', trigger: 600 },
-    { x: 900,  y: 440, type: 'thug',     trigger: 600 },
-    // Wave 3: corridor
-    { x: 1200, y: 440, type: 'thug',     trigger: 1000 },
-    { x: 1350, y: 440, type: 'thug_red', trigger: 1000 },
-    { x: 1450, y: 440, type: 'thug',     trigger: 1000 },
-    // Wave 4: heavy
-    { x: 1800, y: 440, type: 'thug_red', trigger: 1600 },
-    { x: 1950, y: 440, type: 'thug_red', trigger: 1600 },
-    { x: 2100, y: 440, type: 'thug',     trigger: 1600 },
-    // Wave 5: pre-boss
-    { x: 2400, y: 440, type: 'thug',     trigger: 2200 },
-    { x: 2500, y: 440, type: 'thug_red', trigger: 2200 },
-    // BOSS
-    { x: 2900, y: 430, type: 'boss',     trigger: 2700 },
-  ],
-};
-
-// ─── GAME SCENE ──────────────────────────────
+import { TileMap, TS, LevelDef, EnemySpawnDef } from '../systems/TileSystem';
+import { ALL_LEVELS } from '../systems/LevelData';
 
 export class GameScene extends Phaser.Scene {
   private player!: Player;
   private enemies: Enemy[] = [];
-  private pendingEnemies: EnemySpawn[] = [];
-  private platforms!: Phaser.Physics.Arcade.StaticGroup;
-  private backgroundLayers: Phaser.GameObjects.TileSprite[] = [];
+  private pendingEnemies: EnemySpawnDef[] = [];
+
+  // タイルマップ
+  private tileMap!: TileMap;
+  private currentLevelIdx: number = 0;
+  private currentLevel!: LevelDef;
 
   // Audio
-  private bgMusic?: Phaser.Sound.BaseSound;
   private audioContext?: AudioContext;
+  private _sounds: Record<string, AudioBuffer> = {};
 
-  // Level state
-  private levelWidth: number = LEVEL_1.width;
+  // レベル状態
   private bossSpawned: boolean = false;
   private bossEnemy?: Enemy;
   private cleared: boolean = false;
+  private warpCooldown: number = 0;
 
-  // Debug
+  // デバッグ
   private debugGraphics?: Phaser.GameObjects.Graphics;
   private showDebug: boolean = false;
+  private tileDebugGraphics?: Phaser.GameObjects.Graphics;
+
+  // カメラ追従設定
+  private camLerpX: number = 0.08;
+  private camLerpY: number = 0.08;
 
   constructor() {
     super({ key: 'GameScene' });
@@ -103,22 +49,16 @@ export class GameScene extends Phaser.Scene {
   // ─── PRELOAD ──────────────────────────────
 
   preload() {
-    // Assets are canvas-generated; loaded in TitleScene
-    // If coming directly, generate them
     if (!this.textures.exists('player')) {
       const { loadGeneratedAssets } = require('../assets/SpriteGenerator');
       loadGeneratedAssets(this);
-      const { AnimationManager } = require('../systems/AnimationManager');
-      new AnimationManager(this).registerAll();
     }
   }
 
   // ─── CREATE ───────────────────────────────
 
   create() {
-    const { width: W, height: H } = this.scale;
-
-    // Ensure assets loaded
+    // アセット確認
     if (!this.textures.exists('player')) {
       const { loadGeneratedAssets } = require('../assets/SpriteGenerator');
       loadGeneratedAssets(this);
@@ -128,336 +68,378 @@ export class GameScene extends Phaser.Scene {
       new AnimationManager(this).registerAll();
     }
 
-    // Physics world bounds
-    this.physics.world.setBounds(0, 0, this.levelWidth, 600);
-    this.physics.world.gravity.y = 900;
+    this.currentLevel = this.customLevel ?? ALL_LEVELS[this.currentLevelIdx];
+    this.cleared = false;
+    this.bossSpawned = false;
+    this.bossEnemy = undefined;
+    this.enemies = [];
+    this.warpCooldown = 0;
 
-    // ── BACKGROUND LAYERS (parallax) ──────────
+    // ── 物理設定 ─────────────────────────────
 
-    this.setupBackground(W, H);
+    this.physics.world.gravity.y = this.currentLevel.gravity;
 
-    // ── PLATFORM TILES ────────────────────────
+    // ── タイルマップ構築 ──────────────────────
 
-    this.buildLevel();
+    this.buildTileMap();
 
-    // ── PLAYER ────────────────────────────────
+    // ── 背景 ─────────────────────────────────
 
-    this.player = new Player(this, 80, 420);
+    this.setupBackground();
 
-    // Wire UI events
-    this.player.onHpChanged = (hp, max) => {
-      this.events.emit('hpChanged', hp, max);
-    };
-    this.player.onComboChanged = (count) => {
-      this.events.emit('comboChanged', count);
-    };
-    this.player.onStatusChanged = (statuses) => {
-      this.events.emit('statusChanged', statuses);
-      // Check blind
-      this.events.emit('blindChanged', statuses.includes('blind'));
-    };
+    // ── プレイヤー ───────────────────────────
 
-    // ── ENEMIES ───────────────────────────────
+    const { x: spawnWx, y: spawnWy } = this.tileMap.tileToWorld(
+      this.currentLevel.playerStart.x,
+      this.currentLevel.playerStart.y
+    );
+    this.player = new Player(this, spawnWx, spawnWy - TS);
+    this.wirePlayerCallbacks();
 
-    this.pendingEnemies = [...LEVEL_1.enemies];
-    this.spawnInitialEnemies();
-
-    // ── CAMERA ────────────────────────────────
-
-    this.cameras.main.setBounds(0, 0, this.levelWidth, 600);
-    this.cameras.main.startFollow(this.player.sprite, true, 0.1, 0.1);
-    this.cameras.main.setZoom(1);
-    this.cameras.main.fadeIn(400, 0, 0, 0);
-
-    // ── COLLISIONS ────────────────────────────
+    // ── コライダー設定 ────────────────────────
 
     this.setupCollisions();
 
-    // ── AUDIO ─────────────────────────────────
+    // ── 敵スポーン ───────────────────────────
+
+    this.pendingEnemies = [...this.currentLevel.enemies];
+    this.spawnInitialEnemies();
+
+    // ── カメラ ───────────────────────────────
+
+    this.setupCamera();
+
+    // ── オーディオ ───────────────────────────
 
     this.setupAudio();
 
-    // ── UI SCENE ──────────────────────────────
+    // ── UI シーン ────────────────────────────
 
     if (!this.scene.isActive('UIScene')) {
       this.scene.launch('UIScene');
     }
 
-    // ── DEBUG ────────────────────────────────
+    // ── デバッグ ─────────────────────────────
 
-    this.debugGraphics = this.add.graphics().setDepth(99);
+    this.debugGraphics      = this.add.graphics().setDepth(98);
+    this.tileDebugGraphics  = this.add.graphics().setDepth(97);
     this.input.keyboard!.addKey('F1').on('down', () => {
       this.showDebug = !this.showDebug;
+      if (!this.showDebug) {
+        this.debugGraphics?.clear();
+        this.tileDebugGraphics?.clear();
+      }
     });
 
-    // Initial HP emit
+    // ── レベルラベル ─────────────────────────
+
+    this.showLevelBanner(this.currentLevel.name);
+
+    // 初期HP emit
     this.time.delayedCall(100, () => {
       this.events.emit('hpChanged', this.player.hp, this.player.maxHp);
     });
+
+    this.cameras.main.fadeIn(500, 0, 0, 0);
   }
 
-  // ─── BACKGROUND ───────────────────────────
+  // ─── タイルマップ構築 ─────────────────────
 
-  private setupBackground(W: number, H: number) {
-    // Sky (static)
+  private buildTileMap() {
+    this.physics.world.setBounds(
+      0, 0,
+      this.currentLevel.mapWidth  * TS,
+      this.currentLevel.mapHeight * TS
+    );
+    this.tileMap = new TileMap(this, this.currentLevel);
+  }
+
+  // ─── 背景 ────────────────────────────────
+
+  private setupBackground() {
+    const W = this.tileMap.pixelWidth;
+    const H = this.tileMap.pixelHeight;
+    const bgColor = this.currentLevel.bgColor;
+
+    // グラデーション背景
+    const bgGfx = this.add.graphics().setDepth(-4).setScrollFactor(0.05);
+    bgGfx.fillGradientStyle(
+      bgColor, bgColor,
+      (bgColor + 0x0a0520) & 0xffffff, (bgColor + 0x0a0520) & 0xffffff,
+      1
+    );
+    bgGfx.fillRect(0, 0, W, H);
+
+    // 背景建物シルエット
     if (this.textures.exists('bg0')) {
       this.add.image(0, 0, 'bg0')
-        .setOrigin(0, 0)
-        .setDisplaySize(this.levelWidth, H)
-        .setScrollFactor(0.1)
-        .setDepth(-3);
+        .setOrigin(0, 0).setDisplaySize(W, H)
+        .setScrollFactor(0.05).setDepth(-3).setAlpha(0.6);
     }
     if (this.textures.exists('bg1')) {
       this.add.image(0, 0, 'bg1')
-        .setOrigin(0, 0)
-        .setDisplaySize(this.levelWidth, H)
-        .setScrollFactor(0.3)
-        .setDepth(-2);
+        .setOrigin(0, 0).setDisplaySize(W, H)
+        .setScrollFactor(0.2).setDepth(-2).setAlpha(0.7);
     }
     if (this.textures.exists('bg2')) {
       this.add.image(0, 0, 'bg2')
-        .setOrigin(0, 0)
-        .setDisplaySize(this.levelWidth, H)
-        .setScrollFactor(0.6)
-        .setDepth(-1);
+        .setOrigin(0, 0).setDisplaySize(W, H)
+        .setScrollFactor(0.5).setDepth(-1).setAlpha(0.5);
     }
 
-    // Gradient floor atmosphere
-    const gfx = this.add.graphics().setDepth(-1).setScrollFactor(0);
-    const grad = gfx.fillGradientStyle(0x0a0a1a, 0x0a0a1a, 0x1a0a2a, 0x1a0a2a, 1);
-    gfx.fillRect(0, 0, W, H);
+    // レベル固有の装飾
+    this.addLevelSpecificBG();
   }
 
-  // ─── LEVEL BUILD ──────────────────────────
+  private addLevelSpecificBG() {
+    const W  = this.tileMap.pixelWidth;
+    const H  = this.tileMap.pixelHeight;
+    const gfx = this.add.graphics().setDepth(0).setScrollFactor(0.15);
 
-  private buildLevel() {
-    this.platforms = this.physics.add.staticGroup();
-
-    LEVEL_1.platforms.forEach(def => {
-      // Create visual block
-      const gfx = this.add.graphics().setDepth(2);
-      const isGround = def.type === 'floor';
-      const isPlatform = def.type === 'platform';
-
-      if (isGround) {
-        gfx.fillStyle(0x2a2040, 1);
-        gfx.fillRect(def.x, def.y, def.w, def.h);
-        gfx.fillStyle(0x4a3a70, 1);
-        gfx.fillRect(def.x, def.y, def.w, 3);
-        // Floor pattern
-        gfx.lineStyle(1, 0x3a2a50, 0.5);
-        for (let x = def.x; x < def.x + def.w; x += 32) {
-          gfx.lineBetween(x, def.y + 3, x, def.y + def.h);
-        }
-      } else if (isPlatform) {
-        gfx.fillStyle(0x3a2a60, 1);
-        gfx.fillRect(def.x, def.y, def.w, def.h);
-        gfx.fillStyle(0x6a5a90, 1);
-        gfx.fillRect(def.x, def.y, def.w, 3);
-        gfx.fillStyle(0x2a1a50, 1);
-        gfx.fillRect(def.x, def.y + 3, def.w, def.h - 3);
-      } else {
-        gfx.fillStyle(0x2a2040, 1);
-        gfx.fillRect(def.x, def.y, def.w, def.h);
+    if (this.currentLevelIdx === 0) {
+      // 1F廊下: 床の蛍光灯
+      for (let x = 80; x < W; x += 128) {
+        gfx.fillStyle(0xffee88, 0.12);
+        gfx.fillRect(x, 0, 60, H);
+        gfx.fillStyle(0xffee88, 0.35);
+        gfx.fillRect(x + 20, 0, 20, 4);
       }
-
-      // Add invisible physics body
-      const body = this.add.rectangle(def.x + def.w/2, def.y + def.h/2, def.w, def.h);
-      this.platforms.add(body as any);
-      const physBody = (body as any).body as Phaser.Physics.Arcade.StaticBody;
-      if (isPlatform) {
-        physBody.checkCollision.down = true;
-        physBody.checkCollision.left = false;
-        physBody.checkCollision.right = false;
-        physBody.checkCollision.up = false;
+    } else if (this.currentLevelIdx === 1) {
+      // 校舎内部: 縦方向強調グリッド
+      for (let y = 0; y < H; y += TS * 10) {
+        gfx.fillStyle(0x330066, 0.1);
+        gfx.fillRect(0, y, W, 2);
       }
-
-      // Decorations on platforms
-      if (isPlatform && Math.random() > 0.6) {
-        this.addPlatformDecor(def);
+      for (let x = 0; x < W; x += TS * 5) {
+        gfx.fillStyle(0x220044, 0.08);
+        gfx.fillRect(x, 0, 1, H);
       }
-    });
-
-    // School background tiles
-    this.addSchoolDecoratives();
-  }
-
-  private addPlatformDecor(def: PlatformDef) {
-    const gfx = this.add.graphics().setDepth(1);
-    // Railing
-    gfx.lineStyle(1, 0x6644aa, 0.6);
-    for (let x = def.x + 8; x < def.x + def.w; x += 16) {
-      gfx.lineBetween(x, def.y, x, def.y - 20);
+    } else if (this.currentLevelIdx === 2) {
+      // 屋上: 赤警告ライン
+      for (let x = 0; x < W; x += 64) {
+        gfx.fillStyle(x % 128 < 64 ? 0x331111 : 0x220a0a, 0.4);
+        gfx.fillRect(x, H - 32, 64, 32);
+      }
+      // 月光
+      gfx.fillStyle(0xaaaaff, 0.06);
+      gfx.fillCircle(W * 0.7, -20, 80);
     }
-    gfx.lineBetween(def.x, def.y - 20, def.x + def.w, def.y - 20);
   }
 
-  private addSchoolDecoratives() {
-    // Locker banks
-    [200, 800, 1600, 2200].forEach(x => {
-      const gfx = this.add.graphics().setDepth(1);
-      for (let i = 0; i < 5; i++) {
-        const lx = x + i * 24;
-        gfx.fillStyle(0x304060, 1);
-        gfx.fillRect(lx, 380, 22, 100);
-        gfx.fillStyle(0x405080, 1);
-        gfx.fillRect(lx+2, 382, 8, 18);
-        gfx.fillRect(lx+2, 408, 8, 18);
-        gfx.fillStyle(0x88aacc, 0.6);
-        gfx.fillRect(lx+8, 390, 3, 4);
-        gfx.fillRect(lx+8, 416, 3, 4);
-        gfx.lineStyle(1, 0x203050, 1);
-        gfx.strokeRect(lx, 380, 22, 100);
-        gfx.lineBetween(lx, 430, lx+22, 430);
+  // ─── コライダー ───────────────────────────
+
+  private setupCollisions() {
+    const p = this.player.sprite;
+    const tm = this.tileMap;
+
+    // プレイヤー ↔ ソリッドタイル
+    this.physics.add.collider(p, tm.solidGroup);
+
+    // プレイヤー ↔ 片側プラットフォーム
+    this.physics.add.collider(p, tm.platformGroup, undefined, (player, platform) => {
+      const pb = (player as Phaser.Physics.Arcade.Sprite).body as Phaser.Physics.Arcade.Body;
+      // 上から乗っているときのみ衝突
+      return pb.velocity.y >= 0 && pb.bottom <= (platform as any).body.top + 4;
+    });
+
+    // プレイヤー ↔ 移動床（毎フレーム手動処理）
+    // 移動床との衝突は update() で overlap チェック
+
+    // プレイヤー ↔ 梯子（重なり検知）
+    this.physics.add.overlap(p, tm.ladderGroup, () => {
+      this.player.nearLadder = true;
+    });
+
+    // プレイヤー ↔ ハザード
+    this.physics.add.overlap(p, tm.hazardGroup, (_p, hazard) => {
+      const dmg = (hazard as any).__damage ?? 10;
+      this.player.takeDamage(dmg, false);
+    });
+
+    // プレイヤー ↔ バネ
+    this.physics.add.overlap(p, tm.springGroup, () => {
+      this.player.onSpring = true;
+    });
+
+    // プレイヤー ↔ ワープ
+    this.physics.add.overlap(p, tm.warpGroup, () => {
+      if (this.warpCooldown > 0) return;
+      const dest = this.tileMap.getWarpDest(this.player.x, this.player.y);
+      if (dest) {
+        this.warpCooldown = 1500;
+        this.triggerWarp(dest.x, dest.y);
       }
     });
 
-    // Windows in bg
-    [400, 700, 1000, 1400, 1800, 2400].forEach(x => {
-      const gfx = this.add.graphics().setDepth(0).setScrollFactor(0.5);
-      gfx.fillStyle(0x88ccee, 0.15);
-      gfx.fillRect(x, 60, 60, 80);
-      gfx.lineStyle(1, 0x446688, 0.4);
-      gfx.strokeRect(x, 60, 60, 80);
-      gfx.lineBetween(x, 100, x+60, 100);
-      gfx.lineBetween(x+30, 60, x+30, 140);
-    });
+    // プレイヤー ↔ ブレイカブルブロック（攻撃で破壊）
+    this.physics.add.collider(p, tm.solidGroup);
 
-    // Boss arena decorations
-    const bossGfx = this.add.graphics().setDepth(1);
-    bossGfx.fillStyle(0x1a1030, 1);
-    bossGfx.fillRect(2700, 0, 500, 480);
-    // Red lights
-    [2720, 2800, 2900, 3000, 3080].forEach(lx => {
-      bossGfx.fillStyle(0x441111, 0.8);
-      bossGfx.fillRect(lx, 30, 12, 12);
-      bossGfx.fillStyle(0xff2222, 0.5);
-      bossGfx.fillCircle(lx+6, 36, 8);
-    });
-    // Warning stripes on floor
-    for (let sx = 2700; sx < 3200; sx += 32) {
-      bossGfx.fillStyle(sx % 64 < 32 ? 0x331111 : 0x221111, 0.6);
-      bossGfx.fillRect(sx, 460, 32, 20);
-    }
-    // Boss name plate
-    this.add.text(2900, 300, '番長', {
-      fontSize: '40px', fontFamily: 'monospace', color: '#330000', stroke: '#110000', strokeThickness: 4
-    }).setOrigin(0.5).setAlpha(0.3).setDepth(1);
+    // プレイヤー ↔ ワールド境界
+    this.player.sprite.setCollideWorldBounds(true);
+
+    // 敵のコライダーはspawnEnemy()内で設定
   }
 
-  // ─── ENEMIES ──────────────────────────────
+  // ─── カメラ ───────────────────────────────
+
+  private setupCamera() {
+    const W = this.tileMap.pixelWidth;
+    const H = this.tileMap.pixelHeight;
+
+    this.cameras.main.setBounds(0, 0, W, H);
+    this.cameras.main.startFollow(
+      this.player.sprite,
+      true,
+      this.camLerpX,
+      this.camLerpY
+    );
+    // ズーム: 縦に長いステージはズームアウト
+    const targetZoom = this.currentLevelIdx === 1 ? 1.2 : 1.0;
+    this.cameras.main.setZoom(targetZoom);
+  }
+
+  // ─── 敵スポーン ───────────────────────────
 
   private spawnInitialEnemies() {
-    const initial = this.pendingEnemies.filter(e => !e.trigger);
-    this.pendingEnemies = this.pendingEnemies.filter(e => e.trigger);
+    const initial = this.pendingEnemies.filter(e => !e.triggerTileX);
+    this.pendingEnemies = this.pendingEnemies.filter(e => e.triggerTileX);
     initial.forEach(e => this.spawnEnemy(e));
   }
 
-  private spawnEnemy(def: EnemySpawn): Enemy {
+  private spawnEnemy(def: EnemySpawnDef): Enemy {
+    const wx = def.tileX * TS;
+    const wy = def.tileY * TS;
     let enemy: Enemy;
+
     if (def.type === 'boss') {
-      enemy = new GangBoss(this, def.x, def.y);
+      enemy = new GangBoss(this, wx, wy);
       this.bossEnemy = enemy;
       this.bossSpawned = true;
-      // Announce boss
-      this.time.delayedCall(200, () => {
-        this.events.emit('bossHpChanged', enemy.hp, enemy.maxHp, '番長「鬼頭組長」');
-        this.cameras.main.shake(400, 0.015);
-        const txt = this.add.text(this.cameras.main.midPoint.x, 200, '⚠ BOSS ⚠', {
-          fontSize: '32px', fontFamily: 'monospace', color: '#ff2222',
-          stroke: '#000', strokeThickness: 4
-        }).setOrigin(0.5).setDepth(30).setScrollFactor(0);
-        this.tweens.add({ targets: txt, alpha: 0, y: 160, duration: 1500, delay: 1000, onComplete: () => txt.destroy() });
-      });
+      this.announceBoss(enemy);
     } else {
-      const variant = def.type === 'thug_red' ? 'red' : 'blue';
-      enemy = new Thug(this, def.x, def.y, variant);
+      enemy = new Thug(this, wx, wy, def.type === 'thug_red' ? 'red' : 'blue');
     }
 
-    // Add collider with platforms
-    this.physics.add.collider(enemy.sprite, this.platforms);
+    // 敵のコライダー登録
+    this.physics.add.collider(enemy.sprite, this.tileMap.solidGroup);
+    this.physics.add.collider(enemy.sprite, this.tileMap.platformGroup, undefined, (e, p) => {
+      const eb = (e as Phaser.Physics.Arcade.Sprite).body as Phaser.Physics.Arcade.Body;
+      return eb.velocity.y >= 0 && eb.bottom <= (p as any).body.top + 4;
+    });
+
     this.enemies.push(enemy);
     return enemy;
   }
 
-  // ─── COLLISIONS ───────────────────────────
-
-  private setupCollisions() {
-    // Player ↔ platforms
-    this.physics.add.collider(this.player.sprite, this.platforms);
-
-    // Player world bounds
-    this.player.sprite.setCollideWorldBounds(true);
+  private announceBoss(enemy: Enemy) {
+    this.time.delayedCall(200, () => {
+      this.events.emit('bossHpChanged', enemy.hp, enemy.maxHp, '番長「鬼頭組長」');
+      this.cameras.main.shake(400, 0.015);
+      this.cameras.main.flash(200, 60, 0, 0);
+      const W = this.scale.width;
+      const txt = this.add.text(W / 2, 80, '⚠ BOSS ⚠', {
+        fontSize: '32px', fontFamily: 'monospace', color: '#ff2222',
+        stroke: '#000', strokeThickness: 4
+      }).setOrigin(0.5).setDepth(30).setScrollFactor(0);
+      this.tweens.add({ targets: txt, alpha: 0, y: 50, duration: 1500, delay: 1000, onComplete: () => txt.destroy() });
+    });
   }
 
-  // ─── AUDIO ────────────────────────────────
+  // ─── プレイヤーコールバック ────────────────
+
+  private wirePlayerCallbacks() {
+    this.player.onHpChanged = (hp, max) => this.events.emit('hpChanged', hp, max);
+    this.player.onComboChanged = count => this.events.emit('comboChanged', count);
+    this.player.onStatusChanged = statuses => {
+      this.events.emit('statusChanged', statuses);
+      this.events.emit('blindChanged', statuses.includes('blind'));
+    };
+    this.player.onWarp = (wx, wy) => this.triggerWarp(wx, wy);
+  }
+
+  // ─── ワープ処理 ────────────────────────────
+
+  private triggerWarp(toX: number, toY: number) {
+    this.cameras.main.flash(300, 150, 0, 200);
+    this.cameras.main.shake(150, 0.008);
+    // ワープエフェクト
+    const gfx = this.add.graphics().setDepth(50);
+    gfx.fillStyle(0xcc66ff, 0.8);
+    gfx.fillCircle(this.player.x, this.player.y, 30);
+    this.tweens.add({
+      targets: gfx, scaleX: 0, scaleY: 0, alpha: 0, duration: 300,
+      onComplete: () => gfx.destroy()
+    });
+    this.time.delayedCall(150, () => {
+      this.player.sprite.setPosition(toX, toY);
+      (this.player.sprite.body as Phaser.Physics.Arcade.Body).reset(toX, toY);
+    });
+    try { this.sound.play('sfx_dash', { volume: 0.6 }); } catch(_){}
+  }
+
+  // ─── レベルバナー ────────────────────────
+
+  private showLevelBanner(name: string) {
+    const W = this.scale.width;
+    const banner = this.add.text(W / 2, 60, name, {
+      fontSize: '22px', fontFamily: 'monospace', color: '#ccaaff',
+      stroke: '#000', strokeThickness: 4,
+      backgroundColor: '#00000055',
+      padding: { x: 16, y: 6 }
+    }).setOrigin(0.5).setDepth(30).setScrollFactor(0).setAlpha(0);
+
+    this.tweens.add({ targets: banner, alpha: 1, duration: 400 });
+    this.time.delayedCall(1600, () => {
+      this.tweens.add({ targets: banner, alpha: 0, duration: 500, onComplete: () => banner.destroy() });
+    });
+  }
+
+  // ─── オーディオ ───────────────────────────
 
   private setupAudio() {
-    // Generate simple tones via Web Audio API
     try {
       this.audioContext = new AudioContext();
-      this.createSounds();
-    } catch { /* audio not critical */ }
+      const ac = this.audioContext;
+      const tone = (freq: number, dur: number, type: OscillatorType = 'square', vol = 0.3): AudioBuffer => {
+        const sr = ac.sampleRate;
+        const len = Math.floor(sr * dur);
+        const buf = ac.createBuffer(1, len, sr);
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) {
+          const t = i / sr;
+          let s = 0;
+          if (type === 'square')   s = Math.sin(2*Math.PI*freq*t) > 0 ? vol : -vol;
+          else if (type==='sawtooth') s = vol*(2*(t*freq-Math.floor(t*freq+0.5)));
+          else                     s = vol*Math.sin(2*Math.PI*freq*t);
+          const attack = 0.01, release = 0.1;
+          const env = t<attack?t/attack:t>dur-release?(dur-t)/release:1;
+          data[i] = s * env;
+        }
+        return buf;
+      };
+      this._sounds = {
+        sfx_jump:   tone(440, 0.12, 'square',   0.2),
+        sfx_dash:   tone(280, 0.1,  'sawtooth', 0.2),
+        sfx_swing:  tone(220, 0.08, 'square',   0.25),
+        sfx_impact: tone(160, 0.15, 'square',   0.4),
+        sfx_guard:  tone(660, 0.1,  'sine',     0.3),
+        sfx_hurt:   tone(120, 0.2,  'sawtooth', 0.35),
+        sfx_warp:   tone(880, 0.3,  'sine',     0.25),
+        sfx_spring: tone(550, 0.1,  'square',   0.3),
+      };
+      const origPlay = this.sound.play.bind(this.sound);
+      this.sound.play = (key: string, config?: any): any => {
+        if (this._sounds?.[key] && this.audioContext) {
+          this.playBuffer(this._sounds[key], config?.volume ?? 0.3);
+        }
+        return { destroy: () => {} } as any;
+      };
+    } catch { /* audio optional */ }
   }
 
-  private createSounds() {
+  private playBuffer(buf: AudioBuffer, vol = 0.3) {
     if (!this.audioContext) return;
-    const ac = this.audioContext;
-
-    const makeSFX = (key: string, fn: (ctx: AudioContext) => AudioBuffer) => {
-      try {
-        const buf = fn(ac);
-        this.cache.audio.add(key, buf);
-        this.sound.add(key, { audioContext: ac } as any);
-      } catch {}
-    };
-
-    // We'll use Phaser's sound manager with generated buffers
-    // For simplicity, create a tone helper
-    const tone = (freq: number, dur: number, type: OscillatorType = 'square', vol = 0.3): AudioBuffer => {
-      const sr = ac.sampleRate;
-      const len = Math.floor(sr * dur);
-      const buf = ac.createBuffer(1, len, sr);
-      const data = buf.getChannelData(0);
-      for (let i = 0; i < len; i++) {
-        const t = i / sr;
-        let s = 0;
-        if (type === 'square') s = Math.sin(2 * Math.PI * freq * t) > 0 ? vol : -vol;
-        else if (type === 'sawtooth') s = vol * (2 * (t * freq - Math.floor(t * freq + 0.5)));
-        else s = vol * Math.sin(2 * Math.PI * freq * t);
-        // Envelope
-        const attack = 0.01, release = 0.1;
-        const env = t < attack ? t / attack : t > dur - release ? (dur - t) / release : 1;
-        data[i] = s * env;
-      }
-      return buf;
-    };
-
-    // Store as buffers in a lookup for manual playback
-    this._sounds = {
-      sfx_jump:   tone(440, 0.12, 'square', 0.2),
-      sfx_dash:   tone(280, 0.1,  'sawtooth', 0.2),
-      sfx_swing:  tone(220, 0.08, 'square', 0.25),
-      sfx_impact: tone(160, 0.15, 'square', 0.4),
-      sfx_guard:  tone(660, 0.1,  'sine', 0.3),
-      sfx_hurt:   tone(120, 0.2,  'sawtooth', 0.35),
-    };
-
-    // Override scene.sound.play to use our buffers
-    const origPlay = this.sound.play.bind(this.sound);
-    this.sound.play = (key: string, config?: any): any => {
-      if (this._sounds?.[key] && this.audioContext) {
-        this.playBuffer(this._sounds[key], config?.volume ?? 0.3);
-      }
-      return { destroy: () => {} } as any;
-    };
-  }
-
-  private _sounds: Record<string, AudioBuffer> = {};
-
-  private playBuffer(buf: AudioBuffer, vol: number = 0.3) {
-    if (!this.audioContext) return;
-    const src = this.audioContext.createBufferSource();
+    const src  = this.audioContext.createBufferSource();
     const gain = this.audioContext.createGain();
     src.buffer = buf;
     gain.gain.value = vol;
@@ -471,15 +453,101 @@ export class GameScene extends Phaser.Scene {
   update(time: number, delta: number) {
     if (!this.player) return;
 
-    // Update player
+    const dt = delta / 1000;
+
+    // クールダウン
+    if (this.warpCooldown > 0) this.warpCooldown -= delta;
+
+    // ── タイルマップ更新（移動床） ─────────────
+    this.tileMap.update(delta);
+
+    // ── プレイヤーの梯子・バネリセット ──────────
+    this.player.nearLadder = false;
+    this.player.onSpring   = false;
+
+    // ── 移動床との乗り移り ─────────────────────
+    this.updateMovingPlatformRider(dt);
+
+    // ── プレイヤー更新 ────────────────────────
     this.player.update(time, delta);
 
-    // Wave triggers
+    // ── ウェーブトリガー ─────────────────────
     this.checkWaveTriggers();
 
-    // Update enemies
-    const aliveBefore = this.enemies.filter(e => !e.isDead).length;
+    // ── 敵更新・ヒット判定 ───────────────────
+    this.updateEnemies(time, delta);
 
+    // ── プレイヤーのヒット → 敵 ──────────────
+    this.checkPlayerHitsEnemies();
+
+    // ── ブレイカブル攻撃 ─────────────────────
+    if (this.player.hitbox.active) {
+      this.checkBreakableHit();
+    }
+
+    // ── 死亡・クリア判定 ─────────────────────
+    this.checkEndConditions();
+
+    // ── デバッグ描画 ─────────────────────────
+    if (this.showDebug) this.drawDebug();
+    else {
+      this.debugGraphics?.clear();
+      this.tileDebugGraphics?.clear();
+    }
+  }
+
+  // ─── 移動床の乗り移り処理 ────────────────
+
+  private updateMovingPlatformRider(dt: number) {
+    const px = this.player.sprite;
+    const pBody = this.player.sprite.body as Phaser.Physics.Arcade.Body;
+
+    for (const mp of this.tileMap.movingPlatforms) {
+      const mpBody = mp.body.body as Phaser.Physics.Arcade.Body;
+      const mpTop = mp.body.y - mp.body.displayHeight / 2;
+      const pBottom = pBody.bottom;
+      const pLeft   = pBody.left;
+      const pRight  = pBody.right;
+      const mLeft   = mp.body.x - mp.body.displayWidth / 2;
+      const mRight  = mp.body.x + mp.body.displayWidth / 2;
+
+      // プレイヤーが移動床の上に乗っているか
+      const onTop = (
+        pBottom >= mpTop - 4 &&
+        pBottom <= mpTop + 8 &&
+        pRight  >= mLeft &&
+        pLeft   <= mRight &&
+        pBody.velocity.y >= 0
+      );
+
+      if (onTop) {
+        // 移動床の速度を加算（摩擦による追従）
+        const vel = mpBody.velocity;
+        this.player.movingPlatformVel = { x: vel.x, y: vel.y };
+        pBody.setVelocityX(pBody.velocity.x + vel.x * dt * 60);
+        if (vel.y < 0) {
+          pBody.setVelocityY(vel.y);
+        }
+        // 衝突処理
+        if (pBody.velocity.y > 0) {
+          px.setY(mpTop - pBody.height / 2);
+          pBody.setVelocityY(0);
+          (pBody as any).blocked.down = true;
+        }
+      } else {
+        if (this.player.movingPlatformVel.x !== 0 || this.player.movingPlatformVel.y !== 0) {
+          this.player.movingPlatformVel = { x: 0, y: 0 };
+        }
+      }
+
+      // 移動床の物理体を更新（staticなのでリセット必要）
+      mpBody.reset(mp.body.x, mp.body.y);
+    }
+  }
+
+  // ─── 敵更新 ───────────────────────────────
+
+  private updateEnemies(time: number, delta: number) {
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const enemy = this.enemies[i];
       if (enemy.isDead) {
@@ -488,138 +556,223 @@ export class GameScene extends Phaser.Scene {
       }
       enemy.update(time, delta, this.player.x, this.player.y);
 
-      // Check enemy hitbox → player
+      // 敵ヒットボックス → プレイヤー
       if (enemy.hitbox.active && !this.player.isInvincible) {
         if (this.rectsOverlap(
-          enemy.hitbox.x, enemy.hitbox.y, enemy.hitbox.w, enemy.hitbox.h,
+          enemy.hitbox.x - enemy.hitbox.w / 2, enemy.hitbox.y - enemy.hitbox.h / 2,
+          enemy.hitbox.w, enemy.hitbox.h,
           this.player.x - 12, this.player.y - 20, 24, 40
         )) {
           this.player.takeDamage(enemy.hitbox.damage, true, enemy.x);
           enemy.hitbox.active = false;
-          // Apply random status from heavy enemies
+          // ボスからランダムステータス
           if (enemy.isBoss && Math.random() < 0.3) {
             const statuses: StatusType[] = ['shock', 'bleed', 'paralysis'];
-            this.player.statusEffects.apply(
-              statuses[Math.floor(Math.random() * statuses.length)]
-            );
+            this.player.statusEffects.apply(statuses[Math.floor(Math.random() * statuses.length)]);
             this.player.onStatusChanged?.(this.player.statusEffects.getAll());
           }
         }
       }
     }
+  }
 
-    // Check player hitbox → enemies
-    if (this.player.hitbox.active) {
-      for (const enemy of this.enemies) {
-        if (enemy.isDead) continue;
-        if (this.rectsOverlap(
-          this.player.hitbox.x - this.player.hitbox.w / 2,
-          this.player.hitbox.y - this.player.hitbox.h / 2,
-          this.player.hitbox.w,
-          this.player.hitbox.h,
-          enemy.x - 16, enemy.y - 30, 32, 50
-        )) {
-          // Apply damage
-          const isFinisher = this.player.hitbox.isFinisher;
-          enemy.takeDamage(
-            this.player.hitbox.damage * (this.player.statusEffects.reversedControls() ? 0.5 : 1),
-            true,
-            this.player.x,
-            this.getAttackStatus(isFinisher)
-          );
+  // ─── プレイヤー攻撃 → 敵 ─────────────────
 
-          // Spawn hit FX
-          const fxKey = isFinisher ? 'fx_finish' : 'fx_hit';
-          const fx = this.add.sprite(enemy.x, enemy.y - 20, 'fx').setDepth(20);
-          fx.play(fxKey);
-          fx.on('animationcomplete', () => fx.destroy());
+  private checkPlayerHitsEnemies() {
+    if (!this.player.hitbox.active) return;
+    const hb = this.player.hitbox;
 
-          if (isFinisher) {
-            this.player.triggerFinisherEffect();
-          }
+    for (const enemy of this.enemies) {
+      if (enemy.isDead) continue;
+      if (this.rectsOverlap(
+        hb.x - hb.w / 2, hb.y - hb.h / 2, hb.w, hb.h,
+        enemy.x - 16, enemy.y - 30, 32, 50
+      )) {
+        const isFinisher = hb.isFinisher;
+        enemy.takeDamage(
+          hb.damage,
+          true,
+          this.player.x,
+          this.getAttackStatus(isFinisher)
+        );
+        // ヒットFX
+        const fxKey = isFinisher ? 'fx_finish' : 'fx_hit';
+        const fx = this.add.sprite(enemy.x, enemy.y - 20, 'fx').setDepth(20);
+        fx.play(fxKey);
+        fx.once('animationcomplete', () => fx.destroy());
 
-          // One hit per swing
-          this.player.hitbox.active = false;
+        if (isFinisher) this.player.triggerFinisherEffect();
 
-          // Boss HP update
-          if (enemy.isBoss) {
-            this.events.emit('bossHpChanged', Math.max(0, enemy.hp), enemy.maxHp, '番長「鬼頭組長」');
-          }
+        this.player.hitbox.active = false; // 1敵ヒットで終了
+
+        if (enemy.isBoss) {
+          this.events.emit('bossHpChanged', Math.max(0, enemy.hp), enemy.maxHp, '番長「鬼頭組長」');
         }
       }
     }
+  }
 
-    // Check player death
-    if (this.player.isDead && !this.cleared) {
-      this.cleared = true; // prevent re-emit
-      this.time.delayedCall(1500, () => {
-        this.events.emit('playerDead');
-      });
-    }
+  // ─── 破壊ブロック攻撃 ────────────────────
 
-    // Check level clear (boss dead)
-    if (this.bossSpawned && this.bossEnemy?.isDead && !this.cleared) {
-      this.cleared = true;
-      this.time.delayedCall(2000, () => {
-        this.events.emit('levelClear');
-      });
-    }
-
-    // Debug
-    if (this.showDebug) {
-      this.drawDebug();
-    } else {
-      this.debugGraphics?.clear();
+  private checkBreakableHit() {
+    const hb = this.player.hitbox;
+    const { col: hCol, row: hRow } = this.tileMap.worldToTile(hb.x, hb.y);
+    // 攻撃範囲周辺の数タイルをチェック
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        const id = this.tileMap.getTileAt(hCol + dc, hRow + dr);
+        if (id === 15 /* BREAKABLE */) {
+          this.tileMap.breakTileAt(hCol + dc, hRow + dr);
+        }
+      }
     }
   }
 
-  // ─── HELPERS ──────────────────────────────
+  // ─── ウェーブトリガー ─────────────────────
 
   private checkWaveTriggers() {
-    const px = this.player.x;
-    const toSpawn = this.pendingEnemies.filter(e => e.trigger && px >= e.trigger);
+    const playerTileX = Math.floor(this.player.x / TS);
+    const toSpawn = this.pendingEnemies.filter(
+      e => e.triggerTileX !== undefined && playerTileX >= e.triggerTileX
+    );
     if (toSpawn.length === 0) return;
     this.pendingEnemies = this.pendingEnemies.filter(e => !toSpawn.includes(e));
     toSpawn.forEach(e => {
-      // Small delay stagger
       this.time.delayedCall(Math.random() * 300, () => this.spawnEnemy(e));
     });
   }
 
+  // ─── 終了条件 ────────────────────────────
+
+  private checkEndConditions() {
+    // プレイヤー死亡
+    if (this.player.isDead && !this.cleared) {
+      this.cleared = true;
+      this.time.delayedCall(1500, () => {
+        if (this.returnToEditor) {
+          this.cameras.main.fadeOut(400, 0, 0, 0);
+          this.time.delayedCall(400, () => {
+            this.scene.stop('UIScene');
+            this.scene.stop('GameScene');
+            this.scene.start('EditorScene');
+          });
+        } else {
+          this.events.emit('playerDead');
+        }
+      });
+      return;
+    }
+
+    // ボス撃破
+    if (this.bossSpawned && this.bossEnemy?.isDead && !this.cleared) {
+      this.cleared = true;
+      this.time.delayedCall(2000, () => {
+        // 次のレベルへ
+        if (this.currentLevelIdx < ALL_LEVELS.length - 1) {
+          this.transitionToNextLevel();
+        } else {
+          this.events.emit('levelClear');
+        }
+      });
+    }
+  }
+
+  // ─── レベル遷移 ──────────────────────────
+
+  private transitionToNextLevel() {
+    this.cameras.main.fadeOut(600, 0, 0, 0);
+    this.time.delayedCall(600, () => {
+      if (this.returnToEditor) {
+        // エディタプレイテストからなのでエディタに戻る
+        this.scene.stop('GameScene');
+        this.scene.start('EditorScene');
+        return;
+      }
+      this.currentLevelIdx++;
+      this.scene.restart({ levelIdx: this.currentLevelIdx });
+    });
+  }
+
+  // カスタムレベル（エディタから）
+  private customLevel: LevelDef | null = null;
+  private returnToEditor: boolean = false;
+
+  init(data: { levelIdx?: number; customLevel?: LevelDef; returnToEditor?: boolean }) {
+    if (data?.levelIdx !== undefined) {
+      this.currentLevelIdx = data.levelIdx;
+    }
+    this.customLevel    = data?.customLevel ?? null;
+    this.returnToEditor = data?.returnToEditor ?? false;
+  }
+
+  // ─── ヘルパー ────────────────────────────
+
   private getAttackStatus(isFinisher: boolean): StatusType | undefined {
     if (!isFinisher) return undefined;
-    const statuses: StatusType[] = ['bleed', 'shock', 'freeze', 'burn'];
-    return statuses[Math.floor(Math.random() * statuses.length)];
+    const s: StatusType[] = ['bleed', 'shock', 'freeze', 'burn'];
+    return s[Math.floor(Math.random() * s.length)];
   }
 
-  private rectsOverlap(
-    ax: number, ay: number, aw: number, ah: number,
-    bx: number, by: number, bw: number, bh: number
-  ): boolean {
-    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+  private rectsOverlap(ax: number, ay: number, aw: number, ah: number,
+                        bx: number, by: number, bw: number, bh: number): boolean {
+    return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
   }
+
+  // ─── デバッグ描画 ─────────────────────────
 
   private drawDebug() {
-    const g = this.debugGraphics!;
+    const g  = this.debugGraphics!;
+    const tg = this.tileDebugGraphics!;
     g.clear();
+    tg.clear();
 
-    // Player hitbox
-    if (this.player.hitbox.active) {
+    // プレイヤーヒットボックス
+    const hb = this.player.hitbox;
+    if (hb.active) {
       g.lineStyle(1, 0x00ff00, 1);
-      g.strokeRect(
-        this.player.hitbox.x - this.player.hitbox.w / 2,
-        this.player.hitbox.y - this.player.hitbox.h / 2,
-        this.player.hitbox.w,
-        this.player.hitbox.h
-      );
+      g.strokeRect(hb.x - hb.w/2, hb.y - hb.h/2, hb.w, hb.h);
     }
+    // プレイヤー判定ボックス
+    const pb = this.player.sprite.body as Phaser.Physics.Arcade.Body;
+    g.lineStyle(1, 0x00ffff, 0.5);
+    g.strokeRect(pb.left, pb.top, pb.width, pb.height);
 
-    // Enemy hitboxes
+    // 敵ヒットボックス
     for (const e of this.enemies) {
       if (e.hitbox.active) {
-        g.lineStyle(1, 0xff0000, 1);
+        g.lineStyle(1, 0xff2200, 1);
         g.strokeRect(e.hitbox.x - e.hitbox.w/2, e.hitbox.y - e.hitbox.h/2, e.hitbox.w, e.hitbox.h);
       }
+      const eb = e.sprite.body as Phaser.Physics.Arcade.Body;
+      g.lineStyle(1, 0xff6600, 0.4);
+      g.strokeRect(eb.left, eb.top, eb.width, eb.height);
     }
+
+    // 移動床の当たり判定
+    for (const mp of this.tileMap.movingPlatforms) {
+      const mb = mp.body.body as Phaser.Physics.Arcade.Body;
+      g.lineStyle(1, 0xffff00, 0.8);
+      g.strokeRect(mb.left, mb.top, mb.width, mb.height);
+    }
+
+    // プレイヤー状態ラベル
+    const stateInfo = [
+      `pos: (${Math.floor(this.player.x)}, ${Math.floor(this.player.y)})`,
+      `tile: (${Math.floor(this.player.x/TS)}, ${Math.floor(this.player.y/TS)})`,
+      `climb: ${this.player.climbing}`,
+      `nearLadder: ${this.player.nearLadder}`,
+      `vel: (${Math.floor(pb.velocity.x)}, ${Math.floor(pb.velocity.y)})`,
+    ];
+    stateInfo.forEach((line, i) => {
+      const existing = this.children.getByName(`dbg_${i}`) as Phaser.GameObjects.Text | null;
+      if (existing) {
+        existing.setPosition(this.player.x - 40, this.player.y - 90 + i * 12);
+        existing.setText(line);
+      } else {
+        this.add.text(this.player.x - 40, this.player.y - 90 + i * 12, line, {
+          fontSize: '8px', color: '#00ffcc', backgroundColor: '#00000088'
+        }).setDepth(99).setName(`dbg_${i}`);
+      }
+    });
   }
 }
